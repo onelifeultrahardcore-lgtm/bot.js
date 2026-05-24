@@ -212,6 +212,9 @@ client.once("ready", async () => {
 })
 
 client.on("messageCreate", async (message) => {
+  if (message.author.bot) return
+
+  // ---- DEATH TRACKING ----
   if (message.channelId === SERVER_CHAT_ID) {
     const deathMatch = message.content.match(/^(.+?) Has Been Sent To The After Life!$/)
     if (deathMatch) {
@@ -240,70 +243,106 @@ client.on("messageCreate", async (message) => {
     }
   }
 
+  // ---- TRADE LEDGER ----
   if (message.channelId === TRADE_LEDGER_ID) {
-    const content = message.content
-    const isFairTrade =
-      content.toLowerCase().includes("fair trade") &&
-      (content.includes("Your Username") || content.includes("your username"))
+    const lines = message.content.split("\n").map(l => l.trim()).filter(l => l.length > 0)
 
-    if (isFairTrade) {
-      const lines = content.split("\n").map(l => l.trim())
-      let yourUsername = null
-      let theirUsername = null
-      for (const line of lines) {
-        const lower = line.toLowerCase()
-        if (lower.includes("your username")) {
-          yourUsername = line.split(":").slice(1).join(":").replace(/[•\-]/g, "").trim()
-        }
-        if (lower.includes("their username")) {
-          theirUsername = line.split(":").slice(1).join(":").replace(/[•\-]/g, "").trim()
-        }
-      }
-      if (yourUsername && theirUsername) {
-        const user1 = await getDiscordId(yourUsername)
-        const user2 = await getDiscordId(theirUsername)
+    // Must have exactly 3 lines
+    if (lines.length === 3) {
+      const yourUsername = lines[0]
+      const theirUsername = lines[1]
+      const whatTraded = lines[2]
 
-        // If either player is dishonorable, subtract 1 scam point
-        for (const userData of [user1, user2]) {
-          if (!userData) continue
-          const { data: rep } = await supabase
-            .from("player_reputation")
-            .select("*")
-            .eq("discord_id", userData.discord_id)
-            .single()
+      const user1 = await getDiscordId(yourUsername)
+      const user2 = await getDiscordId(theirUsername)
 
-          if (rep?.status === "dishonorable" && rep.scam_points > 0) {
-            const newScamPoints = rep.scam_points - 1
-            const newStatus = newScamPoints < 5 ? "neutral" : "dishonorable"
-            await supabase
-              .from("player_reputation")
-              .update({ scam_points: newScamPoints, status: newStatus })
-              .eq("discord_id", userData.discord_id)
-
-            if (newStatus === "neutral") {
-              const guild = await client.guilds.fetch(GUILD_ID)
-              const member = await guild.members.fetch(userData.discord_id).catch(() => null)
-              if (member) {
-                await updateRoles(member, [], [ROLE_DISHONORABLE])
-              }
-            }
-
-            await sendLog("📉 Scam Point Removed (Fair Trade)", 0xffaa00, [
-              { name: "Player", value: `<@${userData.discord_id}>`, inline: true },
-              { name: "New Scam Points", value: `${newScamPoints}/5`, inline: true },
-              { name: "Status", value: newStatus, inline: true },
-            ])
-          } else {
-            // Normal rep add for non-dishonorable players
-            await updateReputation(userData.discord_id, "rep")
-          }
-        }
-
-        await sendLog("🤝 Fair Trade Logged", 0x00aaff, [
-          { name: "Player 1", value: yourUsername, inline: true },
-          { name: "Player 2", value: theirUsername, inline: true },
+      // Both players must be verified
+      if (!user1 || !user2) {
+        await message.delete().catch(() => {})
+        await sendLog("❌ Invalid Trade Log", 0xff0000, [
+          { name: "Posted By", value: `<@${message.author.id}>`, inline: true },
+          { name: "Line 1 (Your Username)", value: yourUsername, inline: true },
+          { name: "Line 2 (Their Username)", value: theirUsername, inline: true },
+          { name: "Line 3 (What Traded)", value: whatTraded, inline: true },
+          { name: "Reason", value: !user1 && !user2 ? "Neither player is verified" : !user1 ? "Your username not found" : "Their username not found", inline: false },
         ])
+        await message.channel.send(
+          `<@${message.author.id}> ❌ Your trade log was removed — one or both usernames are not verified. Make sure both players have linked their Discord at https://onelifeuhc.org/#honor`
+        ).then(msg => setTimeout(() => msg.delete().catch(() => {}), 10000))
+        return
       }
+
+      // Prevent self trading
+      if (user1.discord_id === user2.discord_id) {
+        await message.delete().catch(() => {})
+        await sendLog("❌ Invalid Trade Log — Self Trade", 0xff0000, [
+          { name: "Posted By", value: `<@${message.author.id}>`, inline: true },
+          { name: "Reason", value: "Cannot trade with yourself", inline: false },
+        ])
+        await message.channel.send(
+          `<@${message.author.id}> ❌ Your trade log was removed — you cannot log a trade with yourself.`
+        ).then(msg => setTimeout(() => msg.delete().catch(() => {}), 10000))
+        return
+      }
+
+      // Line 1 must be the person posting
+      if (user1.discord_id !== message.author.id) {
+        await message.delete().catch(() => {})
+        await sendLog("❌ Invalid Trade Log — Wrong Author", 0xff0000, [
+          { name: "Posted By", value: `<@${message.author.id}>`, inline: true },
+          { name: "Claimed Username", value: yourUsername, inline: true },
+          { name: "Reason", value: "Line 1 must be YOUR Minecraft username", inline: false },
+        ])
+        await message.channel.send(
+          `<@${message.author.id}> ❌ Your trade log was removed — the first line must be YOUR Minecraft username.`
+        ).then(msg => setTimeout(() => msg.delete().catch(() => {}), 10000))
+        return
+      }
+
+      // Valid trade — process rep
+      for (const userData of [user1, user2]) {
+        const { data: rep } = await supabase
+          .from("player_reputation")
+          .select("*")
+          .eq("discord_id", userData.discord_id)
+          .single()
+
+        if (rep?.status === "dishonorable" && rep.scam_points > 0) {
+          const newScamPoints = rep.scam_points - 1
+          const newStatus = newScamPoints < 5 ? "neutral" : "dishonorable"
+          await supabase
+            .from("player_reputation")
+            .update({ scam_points: newScamPoints, status: newStatus })
+            .eq("discord_id", userData.discord_id)
+
+          if (newStatus === "neutral") {
+            const guild = await client.guilds.fetch(GUILD_ID)
+            const member = await guild.members.fetch(userData.discord_id).catch(() => null)
+            if (member) await updateRoles(member, [], [ROLE_DISHONORABLE])
+          }
+
+          await sendLog("📉 Scam Point Removed (Fair Trade)", 0xffaa00, [
+            { name: "Player", value: `<@${userData.discord_id}>`, inline: true },
+            { name: "New Scam Points", value: `${newScamPoints}/5`, inline: true },
+            { name: "Status", value: newStatus, inline: true },
+          ])
+        } else {
+          await updateReputation(userData.discord_id, "rep")
+        }
+      }
+
+      await sendLog("🤝 Fair Trade Logged", 0x00aaff, [
+        { name: "Player 1", value: `${yourUsername} (<@${user1.discord_id}>)`, inline: true },
+        { name: "Player 2", value: `${theirUsername} (<@${user2.discord_id}>)`, inline: true },
+        { name: "What Was Traded", value: whatTraded, inline: false },
+      ])
+
+    } else {
+      // Wrong format
+      await message.delete().catch(() => {})
+      await message.channel.send(
+        `<@${message.author.id}> ❌ Incorrect trade format! Use exactly 3 lines:\n\`\`\`YourMinecraftUsername\nTheirMinecraftUsername\nWhat you traded\`\`\``
+      ).then(msg => setTimeout(() => msg.delete().catch(() => {}), 10000))
     }
   }
 })
