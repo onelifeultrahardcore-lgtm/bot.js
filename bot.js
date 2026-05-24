@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, EmbedBuilder } = require("discord.js")
+const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, EmbedBuilder, PermissionFlagsBits } = require("discord.js")
 const { createClient } = require("@supabase/supabase-js")
 
 const client = new Client({
@@ -27,13 +27,31 @@ const ROLE_DEAD = "1508162872012832778"
 const commands = [
   new SlashCommandBuilder()
     .setName("rep")
-    .setDescription("Give a scam report to a user")
+    .setDescription("Manage player reputation")
     .addSubcommand(sub =>
       sub.setName("scam")
         .setDescription("Report a scam (admin only)")
         .addUserOption(opt =>
           opt.setName("user")
             .setDescription("The Discord user to report")
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName("add")
+        .setDescription("Add a rep point to a user (admin only)")
+        .addUserOption(opt =>
+          opt.setName("user")
+            .setDescription("The Discord user to give rep to")
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName("clear")
+        .setDescription("Clear all reputation points for a user (admin only)")
+        .addUserOption(opt =>
+          opt.setName("user")
+            .setDescription("The Discord user to clear")
             .setRequired(true)
         )
     )
@@ -244,12 +262,46 @@ client.on("messageCreate", async (message) => {
       if (yourUsername && theirUsername) {
         const user1 = await getDiscordId(yourUsername)
         const user2 = await getDiscordId(theirUsername)
-        if (user1) await updateReputation(user1.discord_id, "rep")
-        if (user2) await updateReputation(user2.discord_id, "rep")
+
+        // If either player is dishonorable, subtract 1 scam point
+        for (const userData of [user1, user2]) {
+          if (!userData) continue
+          const { data: rep } = await supabase
+            .from("player_reputation")
+            .select("*")
+            .eq("discord_id", userData.discord_id)
+            .single()
+
+          if (rep?.status === "dishonorable" && rep.scam_points > 0) {
+            const newScamPoints = rep.scam_points - 1
+            const newStatus = newScamPoints < 5 ? "neutral" : "dishonorable"
+            await supabase
+              .from("player_reputation")
+              .update({ scam_points: newScamPoints, status: newStatus })
+              .eq("discord_id", userData.discord_id)
+
+            if (newStatus === "neutral") {
+              const guild = await client.guilds.fetch(GUILD_ID)
+              const member = await guild.members.fetch(userData.discord_id).catch(() => null)
+              if (member) {
+                await updateRoles(member, [], [ROLE_DISHONORABLE])
+              }
+            }
+
+            await sendLog("📉 Scam Point Removed (Fair Trade)", 0xffaa00, [
+              { name: "Player", value: `<@${userData.discord_id}>`, inline: true },
+              { name: "New Scam Points", value: `${newScamPoints}/5`, inline: true },
+              { name: "Status", value: newStatus, inline: true },
+            ])
+          } else {
+            // Normal rep add for non-dishonorable players
+            await updateReputation(userData.discord_id, "rep")
+          }
+        }
+
         await sendLog("🤝 Fair Trade Logged", 0x00aaff, [
           { name: "Player 1", value: yourUsername, inline: true },
           { name: "Player 2", value: theirUsername, inline: true },
-          { name: "Rep Added", value: "+1 to each verified player", inline: false },
         ])
       }
     }
@@ -258,23 +310,69 @@ client.on("messageCreate", async (message) => {
 
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return
-  if (interaction.commandName === "rep" && interaction.options.getSubcommand() === "scam") {
+
+  if (interaction.commandName === "rep") {
     if (!interaction.member.permissions.has("ManageRoles")) {
       return interaction.reply({ content: "❌ You don't have permission to use this command.", ephemeral: true })
     }
+
+    const subcommand = interaction.options.getSubcommand()
     const target = interaction.options.getUser("user")
-    const newPoints = await updateReputation(target.id, "scam")
     const minecraftUsername = await getMinecraftUsername(target.id)
-    await sendLog("⚠️ Scam Report Filed", 0xff6600, [
-      { name: "Reported User", value: `<@${target.id}>`, inline: true },
-      { name: "Minecraft Username", value: minecraftUsername || "Unknown", inline: true },
-      { name: "Total Scam Points", value: `${newPoints}/5`, inline: true },
-      { name: "Reported By", value: `<@${interaction.user.id}>`, inline: false },
-    ])
-    await interaction.reply({
-      content: `⚠️ Scam report filed against <@${target.id}>. They now have **${newPoints}/5** scam points.${newPoints >= 5 ? " They have been marked **Dishonorable**." : ""}`,
-      ephemeral: true
-    })
+
+    // /rep scam
+    if (subcommand === "scam") {
+      const newPoints = await updateReputation(target.id, "scam")
+      await sendLog("⚠️ Scam Report Filed", 0xff6600, [
+        { name: "Reported User", value: `<@${target.id}>`, inline: true },
+        { name: "Minecraft Username", value: minecraftUsername || "Unknown", inline: true },
+        { name: "Total Scam Points", value: `${newPoints}/5`, inline: true },
+        { name: "Reported By", value: `<@${interaction.user.id}>`, inline: false },
+      ])
+      await interaction.reply({
+        content: `⚠️ Scam report filed against <@${target.id}>. They now have **${newPoints}/5** scam points.${newPoints >= 5 ? " They have been marked **Dishonorable**." : ""}`,
+        ephemeral: true
+      })
+    }
+
+    // /rep add
+    if (subcommand === "add") {
+      const newPoints = await updateReputation(target.id, "rep")
+      await sendLog("➕ Rep Point Added", 0x00ff99, [
+        { name: "User", value: `<@${target.id}>`, inline: true },
+        { name: "Minecraft Username", value: minecraftUsername || "Unknown", inline: true },
+        { name: "Total Rep Points", value: `${newPoints}/10`, inline: true },
+        { name: "Added By", value: `<@${interaction.user.id}>`, inline: false },
+      ])
+      await interaction.reply({
+        content: `➕ Rep point added to <@${target.id}>. They now have **${newPoints}/10** rep points.${newPoints >= 10 ? " They have been marked **Honorable**!" : ""}`,
+        ephemeral: true
+      })
+    }
+
+    // /rep clear
+    if (subcommand === "clear") {
+      await supabase
+        .from("player_reputation")
+        .update({ rep_points: 0, scam_points: 0, status: "neutral" })
+        .eq("discord_id", target.id)
+
+      const guild = await client.guilds.fetch(GUILD_ID)
+      const member = await guild.members.fetch(target.id).catch(() => null)
+      if (member) {
+        await updateRoles(member, [], [ROLE_HONORABLE, ROLE_DISHONORABLE])
+      }
+
+      await sendLog("🔄 Reputation Cleared", 0xaaaaaa, [
+        { name: "User", value: `<@${target.id}>`, inline: true },
+        { name: "Minecraft Username", value: minecraftUsername || "Unknown", inline: true },
+        { name: "Cleared By", value: `<@${interaction.user.id}>`, inline: false },
+      ])
+      await interaction.reply({
+        content: `🔄 Reputation cleared for <@${target.id}>. They are now **Neutral**.`,
+        ephemeral: true
+      })
+    }
   }
 })
 
