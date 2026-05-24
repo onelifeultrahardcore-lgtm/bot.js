@@ -19,6 +19,7 @@ const GUILD_ID = "1477770296818925744"
 const SERVER_CHAT_ID = "1507458566624247839"
 const TRADE_LEDGER_ID = "1486001869481443441"
 const LOG_CHANNEL_ID = "1508141267224100995"
+const MEMBER_COUNT_CHANNEL_ID = "1507468674955612251"
 const ROLE_HONORABLE = "1485996258350076005"
 const ROLE_DISHONORABLE = "1485995794761781433"
 const ROLE_ALIVE = "1508162809307857019"
@@ -110,6 +111,31 @@ async function updateRoles(member, addRoles = [], removeRoles = []) {
   }
   for (const roleId of removeRoles) {
     await member.roles.remove(roleId).catch(console.error)
+  }
+}
+
+function getMilestone(count) {
+  if (count < 100) return 100
+  if (count < 250) return 250
+  if (count < 500) return 500
+  if (count < 1000) return 1000
+  if (count < 2500) return 2500
+  return 5000
+}
+
+async function updateMemberCount() {
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID)
+    const memberCount = guild.memberCount
+    const milestone = getMilestone(memberCount)
+    const channelName = `${memberCount}/${milestone} Members`
+    const channel = await client.channels.fetch(MEMBER_COUNT_CHANNEL_ID)
+    if (channel && channel.name !== channelName) {
+      await channel.setName(channelName)
+      console.log(`✅ Updated member count: ${channelName}`)
+    }
+  } catch (err) {
+    console.error("Failed to update member count:", err)
   }
 }
 
@@ -209,6 +235,19 @@ client.once("ready", async () => {
   })
   await registerCommands()
   await syncExistingMembers()
+  await updateMemberCount()
+})
+
+client.on("guildMemberAdd", async (member) => {
+  if (member.guild.id === GUILD_ID) {
+    await updateMemberCount()
+  }
+})
+
+client.on("guildMemberRemove", async (member) => {
+  if (member.guild.id === GUILD_ID) {
+    await updateMemberCount()
+  }
 })
 
 client.on("messageCreate", async (message) => {
@@ -247,7 +286,6 @@ client.on("messageCreate", async (message) => {
   if (message.channelId === TRADE_LEDGER_ID) {
     const lines = message.content.split("\n").map(l => l.trim()).filter(l => l.length > 0)
 
-    // Must have exactly 3 lines
     if (lines.length === 3) {
       const yourUsername = lines[0]
       const theirUsername = lines[1]
@@ -256,7 +294,6 @@ client.on("messageCreate", async (message) => {
       const user1 = await getDiscordId(yourUsername)
       const user2 = await getDiscordId(theirUsername)
 
-      // Both players must be verified
       if (!user1 || !user2) {
         await message.delete().catch(() => {})
         await sendLog("❌ Invalid Trade Log", 0xff0000, [
@@ -272,7 +309,6 @@ client.on("messageCreate", async (message) => {
         return
       }
 
-      // Prevent self trading
       if (user1.discord_id === user2.discord_id) {
         await message.delete().catch(() => {})
         await sendLog("❌ Invalid Trade Log — Self Trade", 0xff0000, [
@@ -285,7 +321,6 @@ client.on("messageCreate", async (message) => {
         return
       }
 
-      // Line 1 must be the person posting
       if (user1.discord_id !== message.author.id) {
         await message.delete().catch(() => {})
         await sendLog("❌ Invalid Trade Log — Wrong Author", 0xff0000, [
@@ -299,7 +334,6 @@ client.on("messageCreate", async (message) => {
         return
       }
 
-      // Valid trade — process rep
       for (const userData of [user1, user2]) {
         const { data: rep } = await supabase
           .from("player_reputation")
@@ -338,7 +372,6 @@ client.on("messageCreate", async (message) => {
       ])
 
     } else {
-      // Wrong format
       await message.delete().catch(() => {})
       await message.channel.send(
         `<@${message.author.id}> ❌ Incorrect trade format! Use exactly 3 lines:\n\`\`\`YourMinecraftUsername\nTheirMinecraftUsername\nWhat you traded\`\`\``
@@ -359,7 +392,6 @@ client.on("interactionCreate", async (interaction) => {
     const target = interaction.options.getUser("user")
     const minecraftUsername = await getMinecraftUsername(target.id)
 
-    // /rep scam
     if (subcommand === "scam") {
       const newPoints = await updateReputation(target.id, "scam")
       await sendLog("⚠️ Scam Report Filed", 0xff6600, [
@@ -374,7 +406,6 @@ client.on("interactionCreate", async (interaction) => {
       })
     }
 
-    // /rep add
     if (subcommand === "add") {
       const newPoints = await updateReputation(target.id, "rep")
       await sendLog("➕ Rep Point Added", 0x00ff99, [
@@ -389,7 +420,6 @@ client.on("interactionCreate", async (interaction) => {
       })
     }
 
-    // /rep clear
     if (subcommand === "clear") {
       await supabase
         .from("player_reputation")
